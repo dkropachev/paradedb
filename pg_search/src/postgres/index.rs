@@ -22,11 +22,11 @@ use std::ops::Deref;
 
 pub enum IndexKind {
     Index(PgSearchRelation),
-    PartitionedIndex(Vec<IndexPartition>),
+    PartitionedIndex(Vec<DiagnosticIndex>),
 }
 
 /// A diagnostic's index, retaining the heap lock when reached through a parent.
-pub enum IndexPartition {
+pub enum DiagnosticIndex {
     Index(PgSearchRelation),
     // Fields drop in declaration order: close the index before its heap.
     Partition {
@@ -35,7 +35,7 @@ pub enum IndexPartition {
     },
 }
 
-impl IndexPartition {
+impl DiagnosticIndex {
     fn open(index_oid: pg_sys::Oid) -> Self {
         unsafe {
             // Resolve unlocked, then lock heap before index like amcheck. Holding
@@ -55,7 +55,7 @@ impl IndexPartition {
     }
 }
 
-impl Deref for IndexPartition {
+impl Deref for DiagnosticIndex {
     type Target = PgSearchRelation;
 
     fn deref(&self) -> &Self::Target {
@@ -87,9 +87,9 @@ impl IndexKind {
     /// Return an iterator over the partitions of this index, which might be
     /// of length 1 if it is not partitioned.
     ///
-    pub fn partitions(self) -> Box<dyn Iterator<Item = IndexPartition>> {
+    pub fn partitions(self) -> Box<dyn Iterator<Item = DiagnosticIndex>> {
         match self {
-            Self::Index(rel) => Box::new(std::iter::once(IndexPartition::Index(rel))),
+            Self::Index(rel) => Box::new(std::iter::once(DiagnosticIndex::Index(rel))),
             Self::PartitionedIndex(rel) => Box::new(rel.into_iter()),
         }
     }
@@ -126,10 +126,10 @@ pub fn leaf_partition_index_oids(parent: &PgSearchRelation) -> Vec<pg_sys::Oid> 
 /// `AccessShareLock`. The returned guard keeps both locks through the diagnostic.
 pub fn leaf_partition_indexes(
     parent: &PgSearchRelation,
-) -> impl Iterator<Item = IndexPartition> + use<> {
+) -> impl Iterator<Item = DiagnosticIndex> + use<> {
     leaf_partition_index_oids(parent)
         .into_iter()
-        .map(IndexPartition::open)
+        .map(DiagnosticIndex::open)
 }
 
 /// The leaves in `leaves` whose `AccessShareLock` is free right now, each opened as it is
