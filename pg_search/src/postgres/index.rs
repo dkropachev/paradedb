@@ -18,10 +18,51 @@
 use crate::postgres::rel::PgSearchRelation;
 use anyhow::{Result, anyhow};
 use pgrx::{PgList, pg_sys};
+use std::ops::Deref;
 
 pub enum IndexKind {
     Index(PgSearchRelation),
-    PartitionedIndex(Vec<PgSearchRelation>),
+    PartitionedIndex(Vec<IndexPartition>),
+}
+
+/// A diagnostic's index, retaining the heap lock when reached through a parent.
+pub enum IndexPartition {
+    Index(PgSearchRelation),
+    // Fields drop in declaration order: close the index before its heap.
+    Partition {
+        index: PgSearchRelation,
+        _heap: PgSearchRelation,
+    },
+}
+
+impl IndexPartition {
+    fn open(index_oid: pg_sys::Oid) -> Self {
+        unsafe {
+            // Resolve unlocked, then lock heap before index like amcheck. Holding
+            // only the parent's lock does not protect against REINDEX on a leaf.
+            let heap_oid = pg_sys::IndexGetRelation(index_oid, false);
+            let heap = PgSearchRelation::with_lock(heap_oid, pg_sys::AccessShareLock as _);
+            let index = PgSearchRelation::with_lock(index_oid, pg_sys::AccessShareLock as _);
+            if index.rel_oid() != Some(heap_oid) {
+                pg_sys::ereport!(
+                    ERROR,
+                    pgrx::PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+                    format!("could not open parent table of index \"{}\"", index.name())
+                );
+            }
+            Self::Partition { index, _heap: heap }
+        }
+    }
+}
+
+impl Deref for IndexPartition {
+    type Target = PgSearchRelation;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Index(index) | Self::Partition { index, .. } => index,
+        }
+    }
 }
 
 impl IndexKind {
@@ -46,9 +87,9 @@ impl IndexKind {
     /// Return an iterator over the partitions of this index, which might be
     /// of length 1 if it is not partitioned.
     ///
-    pub fn partitions(self) -> Box<dyn Iterator<Item = PgSearchRelation>> {
+    pub fn partitions(self) -> Box<dyn Iterator<Item = IndexPartition>> {
         match self {
-            Self::Index(rel) => Box::new(std::iter::once(rel)),
+            Self::Index(rel) => Box::new(std::iter::once(IndexPartition::Index(rel))),
             Self::PartitionedIndex(rel) => Box::new(rel.into_iter()),
         }
     }
@@ -81,14 +122,14 @@ pub fn leaf_partition_index_oids(parent: &PgSearchRelation) -> Vec<pg_sys::Oid> 
         .collect()
 }
 
-/// The leaf partition indexes under `parent`, each opened with `AccessShareLock` as it is
-/// reached, so a caller that needs one leaf locks one leaf.
+/// The leaf partition indexes under `parent`, each opened after its heap with
+/// `AccessShareLock`. The returned guard keeps both locks through the diagnostic.
 pub fn leaf_partition_indexes(
     parent: &PgSearchRelation,
-) -> impl Iterator<Item = PgSearchRelation> + use<> {
+) -> impl Iterator<Item = IndexPartition> + use<> {
     leaf_partition_index_oids(parent)
         .into_iter()
-        .map(|oid| PgSearchRelation::with_lock(oid, pg_sys::AccessShareLock as _))
+        .map(IndexPartition::open)
 }
 
 /// The leaves in `leaves` whose `AccessShareLock` is free right now, each opened as it is

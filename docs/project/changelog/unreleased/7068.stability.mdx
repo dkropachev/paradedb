@@ -1,0 +1,8 @@
+---
+header: stability
+title: Partitioned index diagnostic lock ordering
+---
+
+Lock each partition's table before its index when traversing a partitioned index
+for diagnostics. This prevents `pdb.verify_index(..., heapallindexed => true)` on a
+partitioned parent from deadlocking with `REINDEX` on a child table.
